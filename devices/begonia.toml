@@ -1,0 +1,69 @@
+# The Redmi Note 8 Pro, an A-only MediaTek phone whose stock recovery is
+# the one of MIUI 12.5 on Android 11. Its layout and the parts of it the
+# recovery runs are taken from the device trees kept at
+# github.com/SaiKrishna1504/device_redmi_begonia,
+# github.com/pitpitpo/device_xiaomi_begonia-twrp and
+# gitlab.com/methylphetamine/device_xiaomi_begonia-twrp.
+
+[device]
+codename = "begonia"
+brand = "Xiaomi"
+model = "Redmi Note 8 Pro"
+# The phone has one slot: its recovery partition is its own, not one of two.
+ab = false
+soc = { hans = "联发科 Helio G90T", hant = "聯發科 Helio G90T", en = "MediaTek Helio G90T" }
+os_version_prop = "ro.build.version.incremental"
+
+[display]
+width = 1080
+height = 2340
+density = 440
+diagonal = 6.53
+corner_radius = 60
+
+[modules]
+sources = ["vendor"]
+
+# The phone's own table mounts these where its programs and drivers look
+# for them, and its own recovery leaves them unmounted.
+[partitions]
+mounted = ["persist", "nvdata", "nvcfg", "protect1", "protect2"]
+
+# The WLAN is MediaTek's gen4m on the wmt driver: wlan_drv_gen4m depends on
+# wmt_chrdev_wifi and wmt_drv, which modules.dep loads first. Its firmware
+# is on the vendor partition, where the kernel's firmware loader looks.
+[wlan]
+modules = ["wlan_drv_gen4m"]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant@1.3::ISupplicant/default"
+probe = "http://connectivitycheck.gstatic.com/generate_204"
+
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# The stock build the recovery is made on. This phone's build is not an
+# update package with a payload inside, so the recovery partition is taken
+# whole from a dump of the build instead.
+[stock]
+version = "V12.5.4.0.RGGCNXM"
+image = "https://gitlab.com/Android-Dumps/redmi/begonia/-/raw/begonia-user-11-RP1A.200720.011-V12.5.4.0.RGGCNXM-release-keys/recovery.img"
+recovery = "85ed8572cb5d5d5ba349a3671e337f7122f82e336618798b2c1aa276f25ad8e9"
+
+# The baseband's settings and the phone's own identity are on MediaTek's
+# NVRAM partitions, and the sensors' calibration is on persist.
+[backup]
+efs = ["nvram", "nvdata", "nvcfg", "protect1", "protect2", "persist", "proinfo"]
+data_skipped = ["vendor/tzstorage", "vendor/mtee", "vendor/fingerprint", "vendor/fpdata"]
+
+# Where the phone's own programs keep logs and crash dumps in the data
+# partition.
+[wipe]
+logs = [
+    "/data/vendor/mtklog",
+    "/data/vendor/connsyslog",
+    "/data/vendor/aee_exp",
+    "/data/vendor/corelog",
+    "/data/vendor/ramdump",
+]

@@ -105,19 +105,28 @@ pub fn with_program(image: &[u8], own_ramdisk: Option<u64>, program: &[u8], star
 pub(crate) mod tests {
     use super::*;
     use crate::state::tests::area;
-    use abootimg_oxide::{HeaderV3, OsVersionPatch};
+    use abootimg_oxide::{Header, HeaderV3, OsVersionPatch};
 
     /// A version 4 init_boot image with `ramdisk` and no kernel, filling a
     /// partition of a MiB.
     pub fn template(ramdisk: &[u8]) -> Vec<u8> {
-        let header = HeaderV3 {
+        let header = Header::V3(HeaderV3 {
             kernel_size: 0,
             ramdisk_size: ramdisk.len() as u32,
             osversionpatch: OsVersionPatch(0),
             cmdline: Box::new([0; 1536]),
             v4_signature_size: Some(0),
-        };
-        let mut image = BootImage { header, kernel: Vec::new(), ramdisk: ramdisk.to_vec() }.to_bytes().unwrap();
+        });
+        let mut image = BootImage {
+            header,
+            kernel: Vec::new(),
+            ramdisk: ramdisk.to_vec(),
+            second: Vec::new(),
+            recovery_dtbo: Vec::new(),
+            dtb: Vec::new(),
+        }
+        .to_bytes()
+        .unwrap();
         image.resize(1 << 20, 0);
         image
     }

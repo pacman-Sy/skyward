@@ -49,11 +49,15 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    /// Unpack an LZ4 (legacy framing) compressed newc archive, as Android
-    /// boot images carry.
+    /// Unpack an LZ4 (legacy framing) or gzip compressed newc archive, as
+    /// Android boot images carry.
     pub fn decode(compressed: &[u8]) -> Result<Self> {
         let mut cpio = Vec::new();
-        lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        if compressed.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(compressed).read_to_end(&mut cpio).context("gzip decode")?;
+        } else {
+            lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        }
         let mut entries = Vec::new();
         let mut rest = Cursor::new(cpio.as_slice());
         loop {
@@ -85,6 +89,16 @@ impl Ramdisk {
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
         lz4_tool(&self.archive()?)
+    }
+
+    /// Pack as a newc archive in gzip framing, as Android 11 and older boot
+    /// images carry their ramdisks.
+    pub fn encode_gzip(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut encoder = flate2::write::GzEncoder::new(&mut out, flate2::Compression::best());
+        encoder.write_all(&self.archive()?).context("gzip the archive")?;
+        encoder.finish().context("finish the gzip archive")?;
+        Ok(out)
     }
 
     /// Pack as a newc archive, uncompressed.

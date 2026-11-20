@@ -26,6 +26,9 @@ tempfile = "3.27.0"
 # server, reading only what that partition takes, and reads the other
 # partitions where they lie in it.
 unpayload = { version = "0.1.2", default-features = false, features = ["http"] }
+# Takes a stock recovery image down from where a phone's build is kept as
+# an image rather than as an update package.
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 serde_json = "1.0.145"

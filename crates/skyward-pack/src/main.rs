@@ -117,7 +117,9 @@ fn main() -> Result<()> {
         }
         Cmd::Repack { image, out } => {
             let mut img = BootImage::read(&image)?;
-            img.ramdisk = Ramdisk::decode(&img.ramdisk)?.encode()?;
+            let gzip = img.ramdisk.starts_with(&[0x1f, 0x8b]);
+            let rd = Ramdisk::decode(&img.ramdisk)?;
+            img.ramdisk = if gzip { rd.encode_gzip()? } else { rd.encode()? };
             write(&out, &img, &img.to_bytes()?)
         }
         Cmd::Boot { kernel, ramdisk, out } => {
@@ -128,6 +130,7 @@ fn main() -> Result<()> {
         Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
+            let gzip = img.ramdisk.starts_with(&[0x1f, 0x8b]);
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
@@ -168,13 +171,14 @@ fn main() -> Result<()> {
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
-            img.ramdisk = rd.encode()?;
+            img.ramdisk = if gzip { rd.encode_gzip()? } else { rd.encode()? };
             let bytes = img.to_bytes()?;
             write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
-            println!("version={}\npackage={}\nrecovery={}", stock.version, stock.package, stock.recovery);
+            let package = stock.package.as_deref().or(stock.image.as_deref()).unwrap_or_default();
+            println!("version={}\npackage={}\nrecovery={}", stock.version, package, stock.recovery);
             match out {
                 Some(out) => take_stock_recovery(&stock, &out),
                 None => Ok(()),
@@ -182,8 +186,9 @@ fn main() -> Result<()> {
         }
         Cmd::Described { config, partitions, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
+            let package = stock.package.as_deref().context("the stock build names no full update package")?;
             let partitions = if partitions.is_empty() { skyward_programs::phone::PARTITIONS.map(str::to_string).to_vec() } else { partitions };
-            described::take(&stock.package, &partitions, &out)
+            described::take(package, &partitions, &out)
         }
     }
 }
@@ -192,14 +197,24 @@ fn main() -> Result<()> {
 const RECOVERY: &str = "recovery";
 
 /// Take the recovery partition out of the stock build's full update package
-/// on its server, reading only what that partition takes of it, and write it
-/// to `out` once its SHA-256 is the one the configuration names.
+/// on its server, reading only what that partition takes of it, or down from
+/// where the build keeps the partition as an image, and write it to `out`
+/// once its SHA-256 is the one the configuration names.
 fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> {
     let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
     // Taken out beside where it goes, so it is moved there whole.
     let work = tempfile::Builder::new().prefix(".stock").tempdir_in(parent).with_context(|| format!("make a folder in {}", parent.display()))?;
-    let payload = unpayload::Payload::open_url(&stock.package).with_context(|| format!("open {}", stock.package))?;
+    if let Some(url) = &stock.image {
+        let taken = work.path().join("recovery.img");
+        download(url, &taken).with_context(|| format!("take the recovery image down from {url}"))?;
+        check_sum(&taken, &stock.recovery, url)?;
+        std::fs::rename(&taken, out).with_context(|| format!("move {} to {}", taken.display(), out.display()))?;
+        println!("wrote {} ({} bytes), its SHA-256 the one the configuration names", out.display(), std::fs::metadata(out)?.len());
+        return Ok(());
+    }
+    let package = stock.package.as_deref().context("the stock build names neither a package nor an image")?;
+    let payload = unpayload::Payload::open_url(package).with_context(|| format!("open {package}"))?;
     let options = unpayload::ExtractOptions { output_dir: work.path().to_path_buf(), partitions: vec![RECOVERY.into()], ..Default::default() };
     let report = |event: unpayload::Event<'_>| match event {
         unpayload::Event::Started { partitions } => {
@@ -210,12 +225,42 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> 
         unpayload::Event::Extracted(image) => println!("took {} out: {} bytes", image.partition, image.size),
         unpayload::Event::Progress { .. } => {}
     };
-    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {}", stock.package))?;
-    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{} holds no {RECOVERY} partition", stock.package))?;
+    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {package}"))?;
+    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{package} holds no {RECOVERY} partition"))?;
     let sum = hex::encode(image.sha256.as_deref().context("the package's own sum of the image was not checked")?);
-    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {} has the SHA-256 {sum}, where the configuration names {}", stock.package, stock.recovery);
+    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {package} has the SHA-256 {sum}, where the configuration names {}", stock.recovery);
     std::fs::rename(&image.path, out).with_context(|| format!("move {} to {}", image.path.display(), out.display()))?;
     println!("wrote {} ({} bytes), its SHA-256 the one the configuration names", out.display(), image.size);
+    Ok(())
+}
+
+/// Download `url` to `path`.
+fn download(url: &str, path: &Path) -> Result<()> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+    let mut response = agent.get(url).call().context("ask the server for it")?;
+    let status = response.status().as_u16();
+    ensure!(status == 200, "the server answered {status}");
+    let mut body = response.body_mut().with_config().limit(u64::MAX).reader();
+    let mut file = File::create(path).with_context(|| format!("make {}", path.display()))?;
+    std::io::copy(&mut body, &mut file).with_context(|| format!("write {}", path.display()))?;
+    file.sync_all().with_context(|| format!("write {} through", path.display()))?;
+    Ok(())
+}
+
+/// Check that `path` has the SHA-256 `sum`.
+fn check_sum(path: &Path, sum: &str, from: &str) -> Result<()> {
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf).with_context(|| format!("read {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    let found = hex::encode(hash.finalize());
+    ensure!(found == sum, "the recovery image at {from} has the SHA-256 {found}, where the configuration names {sum}");
     Ok(())
 }
 
@@ -288,7 +333,7 @@ fn list(image: &Path) -> Result<()> {
         h.header_version(),
         img.kernel.len(),
         img.ramdisk.len(),
-        h.osversionpatch
+        h.osversionpatch()
     );
     if img.ramdisk.is_empty() {
         return Ok(());

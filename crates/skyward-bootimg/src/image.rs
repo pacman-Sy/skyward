@@ -1,5 +1,6 @@
 use abootimg_oxide::{binrw::io::Cursor, Header, HeaderV0Versioned, HeaderV3};
 use anyhow::{anyhow, Context, Result};
+use sha1::{Digest, Sha1};
 use std::fs;
 use std::path::Path;
 
@@ -102,6 +103,23 @@ impl BootImage {
                         *dtb_size = u32::try_from(self.dtb.len()).context("device tree size")?;
                     }
                 }
+                // The hash the header keeps of its parts, which older
+                // bootloaders read, over each part and then its size.
+                let mut parts: Vec<&[u8]> = vec![&self.kernel, &self.ramdisk, &self.second];
+                if !matches!(header.versioned, HeaderV0Versioned::V0) {
+                    parts.push(&self.recovery_dtbo);
+                }
+                if matches!(header.versioned, HeaderV0Versioned::V2 { .. }) {
+                    parts.push(&self.dtb);
+                }
+                let mut hash = Sha1::new();
+                for part in parts {
+                    hash.update(part);
+                    hash.update(u32::try_from(part.len()).context("part size")?.to_le_bytes());
+                }
+                let digest = hash.finalize();
+                header.hash_digest = [0u8; 32];
+                header.hash_digest[..digest.len()].copy_from_slice(&digest);
                 let mut out = Vec::new();
                 Header::V0(header).write(&mut out).context("write header")?;
                 pad(&mut out, page);
